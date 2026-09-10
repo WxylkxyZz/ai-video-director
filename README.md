@@ -33,6 +33,20 @@ cp .env.example .env   # 或手动创建，见下方「视觉模型配置」
 
 ## 工作流
 
+### 快速模式（推荐）
+```text
+python analyze_video.py <参考视频.mp4>
+    │
+    ├─ ffprobe → 元数据
+    ├─ ffmpeg  → 抽帧 → tmp/<视频名>/frames/
+    ├─ vision_reader → 视觉读帧 → frames/*.txt
+    └─ 拼接 → tmp/<视频名>/analysis.txt （精简 stdout）
+            │
+            ▼
+        Claude 读 analysis.txt → 合成 report.md
+```
+
+### 手动完整流程
 ```text
 参考视频.mp4
     │
@@ -49,6 +63,8 @@ cp .env.example .env   # 或手动创建，见下方「视觉模型配置」
 | 文件 | 用途 |
 |---|---|
 | `vision_reader.py` | 抽帧结果发视觉 API，支持主/备双模型自动 fallback |
+| `analyze_video.py` | 固化流程脚本：一条命令跑完probe→抽帧→读图→拼analysis.txt，输出精简 |
+| `.env` | API 配置（key、base_url、模型名）**不入 git** |
 | `.env` | API 配置（key、base_url、模型名）**不入 git** |
 | `.env.example` | 配置模板（无真实密钥，可入库） |
 | `.gitignore` | 忽略 `.env` 与 `tmp/` |
@@ -66,6 +82,10 @@ cp .env.example .env   # 或手动创建，见下方「视觉模型配置」
 ## 使用
 
 ```bash
+# === 快速模式（推荐）===
+python analyze_video.py <video.mp4> [--fps 1] [--scale 640] [--q 6]
+
+# === 手动单步 ===
 # 1. 放视频到当前目录
 cp /path/to/video.mp4 .
 

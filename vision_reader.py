@@ -256,13 +256,16 @@ def run_batch(image_paths, prompt,
             futs[fut] = p
         for fut in cf.as_completed(futs):
             p = futs[fut]
+            out = Path(p).with_suffix(".txt")
             try:
                 text, tag = fut.result()
                 results[p] = text
-                out = Path(p).with_suffix(".txt")
                 out.write_text(text, encoding="utf-8")
             except Exception as e:
-                results[p] = f"[ERROR] {e}"
+                err = f"[ERROR] {e}"
+                results[p] = err
+                # 失败也写占位 txt，避免 analysis 拼接时静默缺帧
+                out.write_text(err, encoding="utf-8")
     return results
 
 
