@@ -1,5 +1,10 @@
 # 忽略含密钥的本地配置
 .env
+!.env.example
 
 # 临时文件（帧图、分析文本、报告）
 tmp/
+
+# Python
+__pycache__/
+*.pyc
