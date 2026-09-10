@@ -62,9 +62,8 @@ python analyze_video.py <参考视频.mp4>
 
 | 文件 | 用途 |
 |---|---|
-| `vision_reader.py` | 抽帧结果发视觉 API，支持主/备双模型自动 fallback |
+| `vision_reader.py` | 抽帧结果发视觉 API，支持主/备双模型 fallback + `--shard` 多渠道分片 |
 | `analyze_video.py` | 固化流程脚本：一条命令跑完probe→抽帧→读图→拼analysis.txt，输出精简 |
-| `.env` | API 配置（key、base_url、模型名）**不入 git** |
 | `.env` | API 配置（key、base_url、模型名）**不入 git** |
 | `.env.example` | 配置模板（无真实密钥，可入库） |
 | `.gitignore` | 忽略 `.env` 与 `tmp/` |
@@ -74,16 +73,35 @@ python analyze_video.py <参考视频.mp4>
 
 ## 视觉模型配置（.env）
 
-主模型 `gemini-2.5-flash`（ai.hybgzs.com/v1），备选 `vision`（octopus.ollia.top/v1）。
-自动检测穿搭/购物建议并 fallback。
+支持**多渠道**。主模型 `gemini-2.5-flash`（ai.hybgzs.com/v1），备选 `grok-4.6`（octopus.ollia.top/v1），另可用 `CHANNEL_n_*` 追加更多渠道。
 
-修改 `.env` 即可切换模型。
+三种读取模式：
+- **普通模式**（不带 `--shard`）：走 主→备 两级 fallback（购物建议检测触发备模型）
+- **分片模式**（`--shard`）：自动识别全部渠道（OPENAI_*/FALLBACK_*/CHANNEL_n_*），每帧轮流发不同渠道，单渠道失败自动换下一渠道兜底 — 分散限流配额、提高吞吐
+
+```env
+# 主 / 备（不变）
+OPENAI_BASE_URL=...
+OPENAI_API_KEY=...
+OPENAI_VISION_MODEL=...
+FALLBACK_BASE_URL=...
+FALLBACK_API_KEY=...
+FALLBACK_VISION_MODEL=...
+
+# 追加渠道（n = 1,2,3...，--shard 自动识别）
+CHANNEL_1_BASE_URL=...
+CHANNEL_1_API_KEY=...
+CHANNEL_1_MODEL=...
+```
+
+修改 `.env` 即可切换模型。注意 `.env` 不入 git，克隆后按 `.env.example` 重建。
 
 ## 使用
 
 ```bash
 # === 快速模式（推荐）===
-python analyze_video.py <video.mp4> [--fps 1] [--scale 640] [--q 6]
+python analyze_video.py <video.mp4> [--fps 1] [--scale 640] [--q 6] [--workers 6] [--shard]
+#   --shard    多渠道分片负载：每帧轮流发不同渠道，避免单渠道限流
 
 # === 手动单步 ===
 # 1. 放视频到当前目录

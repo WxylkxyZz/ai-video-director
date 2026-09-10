@@ -13,8 +13,10 @@ stdout 只打印精简摘要，不刷屏；导演报告（report.md）由 Claude
 """
 
 import argparse
+import json
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import vision_reader  # 复用 get_env / run_batch
@@ -71,10 +73,20 @@ def extract_frames(video: Path, workdir: Path, fps: int, scale: int, q: int) -> 
     return len(list(frames_dir.glob("frame_*.jpg")))
 
 
-def read_frames(workdir: Path, workers: int, timeout: int, no_fallback: bool):
+def read_frames(workdir: Path, workers: int, timeout: int, no_fallback: bool,
+                shard: bool):
     frames = sorted((workdir / "frames").glob("frame_*.jpg"))
     prompt = workdir / "prompt.txt"
     prompt.write_text(DEFAULT_PROMPT, encoding="utf-8")
+
+    if shard:
+        channels = vision_reader.load_channels()
+        if not channels:
+            print("错误：--shard 但未找到任何渠道（检查 .env）", file=sys.stderr)
+            sys.exit(2)
+        vision_reader.run_batch_sharded(frames, prompt.read_text(encoding="utf-8"),
+                                        channels, workers, timeout)
+        return channels[0][2], channels  # model_name, channels
 
     primary = (
         vision_reader.get_env("OPENAI_BASE_URL"),
@@ -93,10 +105,9 @@ def read_frames(workdir: Path, workers: int, timeout: int, no_fallback: bool):
         print("错误：需要设置 OPENAI_BASE_URL 和 OPENAI_API_KEY（.env）", file=sys.stderr)
         sys.exit(2)
 
-    # 写提示词文件后，逐帧读图并落盘 .txt（写入在 run_batch 内完成）
     vision_reader.run_batch(frames, prompt.read_text(encoding="utf-8"),
                             primary, fallback, workers, timeout)
-    return primary, fallback
+    return primary[2], fallback
 
 
 def concat_analysis(workdir: Path):
@@ -124,9 +135,11 @@ def main():
     ap.add_argument("--fps", type=int, default=1, help="抽帧频率（默认 1，快动作可 2）")
     ap.add_argument("--scale", type=int, default=640, help="帧图宽度（默认 640）")
     ap.add_argument("--q", type=int, default=6, help="JPEG 质量 2-31，越小质量越高（默认 6）")
-    ap.add_argument("--workers", type=int, default=4, help="视觉 API 并发数")
+    ap.add_argument("--workers", type=int, default=6, help="全局视觉 API 并发数（默认 6，越多越快但易撞限流）")
     ap.add_argument("--timeout", type=int, default=180, help="单帧 API 超时（秒）")
     ap.add_argument("--no-fallback", action="store_true", help="禁用备用视觉模型")
+    ap.add_argument("--shard", action="store_true",
+                    help="多渠道分片负载：每帧轮流发不同渠道，避免单渠道限流")
     args = ap.parse_args()
 
     video = Path(args.video)
@@ -137,20 +150,44 @@ def main():
     workdir = Path("tmp") / video.stem
     workdir.mkdir(parents=True, exist_ok=True)
 
+    # ---- 分阶段计时 ----
+    t_all = time.perf_counter()
+    timings = {}
+
+    t0 = time.perf_counter()
     meta = probe(video)
     (workdir / "duration.txt").write_text(meta["duration"], encoding="utf-8")
+    timings["probe"] = time.perf_counter() - t0
+
+    t0 = time.perf_counter()
     n = extract_frames(video, workdir, args.fps, args.scale, args.q)
+    timings["extract"] = time.perf_counter() - t0
     if n == 0:
         print("错误：抽帧结果为空", file=sys.stderr)
         sys.exit(2)
-    primary, fallback = read_frames(workdir, args.workers, args.timeout, args.no_fallback)
-    concat_analysis(workdir)
 
-    model_mode = primary[2]
-    if fallback and not args.no_fallback:
-        model_mode += f" + fallback({fallback[2]})"
-    elif args.no_fallback:
-        model_mode += "（no-fallback）"
+    t0 = time.perf_counter()
+    primary_model, channels = read_frames(
+        workdir, args.workers, args.timeout, args.no_fallback, args.shard)
+    timings["vision_read"] = time.perf_counter() - t0
+
+    t0 = time.perf_counter()
+    concat_analysis(workdir)
+    timings["concat"] = time.perf_counter() - t0
+
+    timings["total"] = time.perf_counter() - t_all
+
+    # read_frames 返回 (primary_model, channels)：
+    #   shard 模式 -> channels 为渠道列表;  非 shard 模式 -> channels 为 fallback 元组或 None
+    if args.shard and isinstance(channels, list) and channels:
+        model_mode = "shard(" + ",".join(c[3] for c in channels) + ")"
+    else:
+        model_mode = primary_model
+        if isinstance(channels, tuple) and channels:
+            model_mode += f" + fallback({channels[2]})"
+        elif args.no_fallback:
+            model_mode += "（no-fallback）"
+
     dur = meta["duration"] or "未知"
     res = f"{meta['width']}x{meta['height']}" if meta["width"] else "未知"
     print(f"视频: {workdir.name}")
@@ -158,6 +195,15 @@ def main():
     print(f"帧数: {n}")
     print(f"模型: {model_mode}")
     print(f"产物: {workdir / 'frames'} / {workdir / 'analysis.txt'}")
+    print("耗时(墙钟, 即真实经过时间):")
+    print(f"  probe(元数据探测):      {timings['probe']:.2f}s")
+    print(f"  extract(抽帧):          {timings['extract']:.2f}s")
+    print(f"  vision_read(视觉读图):  {timings['vision_read']:.2f}s  ({n}帧 @ {args.workers}路并发)")
+    print(f"  concat(拼 analysis):    {timings['concat']:.2f}s")
+    print(f"  total(总耗时):          {timings['total']:.2f}s")
+
+    (workdir / "timing.json").write_text(
+        json.dumps(timings, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 if __name__ == "__main__":

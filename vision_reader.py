@@ -269,6 +269,92 @@ def run_batch(image_paths, prompt,
     return results
 
 
+# ---------- 多渠道分片负载 ----------
+
+def load_channels() -> list[tuple]:
+    """
+    读取所有可用视觉渠道，返回 [(base_url, api_key, model, label), ...]。
+    读取顺序: OPENAI_*(主) → FALLBACK_*(备) → CHANNEL_n_*(n=1..N)。
+    同 base_url+model 去重，保留先出现者。渠道多时应把主渠道放最前。
+    """
+    chans = []
+    seen = set()
+    candidates = [
+        (get_env("OPENAI_BASE_URL"), get_env("OPENAI_API_KEY"),
+         get_env("OPENAI_VISION_MODEL") or DEFAULT_MODEL, "p1"),
+        (get_env("FALLBACK_BASE_URL"), get_env("FALLBACK_API_KEY"),
+         get_env("FALLBACK_VISION_MODEL"), "p2"),
+    ]
+    n = 1
+    while True:
+        url = get_env(f"CHANNEL_{n}_BASE_URL")
+        key = get_env(f"CHANNEL_{n}_API_KEY")
+        model = get_env(f"CHANNEL_{n}_MODEL")
+        if not (url and key):
+            break
+        candidates.append((url, key, model, f"ch{n}"))
+        n += 1
+    for url, key, model, label in candidates:
+        if not (url and key and model):
+            continue
+        k = (url.rstrip("/"), model)
+        if k in seen:
+            continue
+        seen.add(k)
+        chans.append((url, key, model, label))
+    return chans
+
+
+def _read_round_robin(image_path, prompt, channels, start_idx, timeout,
+                      frame_index, total_frames) -> str:
+    """从 start_idx 渠道开始尝试，失败时依次轮询其余渠道兜底。"""
+    last_err = None
+    n = len(channels)
+    for k in range(n):
+        ch = channels[(start_idx + k) % n]
+        try:
+            text, _tag = call_one(image_path, prompt, ch[0], ch[1], ch[2],
+                                  timeout=timeout, label=ch[3],
+                                  frame_index=frame_index,
+                                  total_frames=total_frames)
+            return text
+        except Exception as e:
+            last_err = e
+            print(f"  [*] {ch[3]} 失败，换下一渠道: {e}", file=sys.stderr)
+    raise RuntimeError(f"所有 {n} 个渠道均失败: {last_err}")
+
+
+def run_batch_sharded(image_paths, prompt, channels,
+                      workers, timeout=DEFAULT_TIMEOUT) -> dict:
+    """
+    分片负载：帧轮流分配给各渠道（每帧只发一个渠道，token 不浪费），
+    用全局线程池并发跑。某渠道失败时换下一渠道兜底。
+    channels = [(base_url, api_key, model, label), ...]
+    """
+    results = {}
+    total = len(image_paths)
+    n = len(channels)
+    with cf.ThreadPoolExecutor(max_workers=workers) as ex:
+        futs = {}
+        for i, p in enumerate(image_paths, start=1):
+            start_idx = (i - 1) % n
+            fut = ex.submit(_read_round_robin, p, prompt, channels, start_idx,
+                            timeout, i, total)
+            futs[fut] = p
+        for fut in cf.as_completed(futs):
+            p = futs[fut]
+            out = Path(p).with_suffix(".txt")
+            try:
+                text = fut.result()
+                results[p] = text
+                out.write_text(text, encoding="utf-8")
+            except Exception as e:
+                err = f"[ERROR] {e}"
+                results[p] = err
+                out.write_text(err, encoding="utf-8")
+    return results
+
+
 # ---------- 展开文件列表 ----------
 
 def expand_paths(spec: str, start: int | None, end: int | None,
