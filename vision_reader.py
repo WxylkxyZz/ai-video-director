@@ -15,6 +15,7 @@ vision_reader.py — 读取视频帧图片，通过 OpenAI 兼容的视觉接口
 
 用法：
   python vision_reader.py frame_0001.jpg                       # 单图 + 默认 prompt
+  python vision_reader.py a.jpg b.jpg c.jpg                     # 多图一次传
   python vision_reader.py *.jpg --workers 4                     # 批量并行
   python vision_reader.py frames/frame_%04d.jpg --start 1 --end 7  # printf 格式
   python vision_reader.py frame.jpg --prompt-file prompt.txt    # 从文件读指令
@@ -391,8 +392,9 @@ def main():
             pass
 
     ap = argparse.ArgumentParser(description="OpenAI 兼容视觉接口读图（带自动 fallback）")
-    ap.add_argument("input", help="图片路径 / 目录 / glob / printf格式")
-    ap.add_argument("prompt", nargs="?", default=None,
+    ap.add_argument("input", nargs="+", metavar="image",
+                    help="图片路径 / 目录 / glob / printf格式，可一次传多个")
+    ap.add_argument("--prompt", default=None,
                     help="分析指令。留空则从 --prompt-file 或 stdin 读取")
     ap.add_argument("--prompt-file", default=None,
                     help="从文件读取分析指令（推荐，避免中文编码问题）")
@@ -418,10 +420,16 @@ def main():
     if not prompt:
         prompt = "请描述这个画面：人物、动作、场景、关键细节。"
 
-    # 展开文件
-    files = expand_paths(args.input, args.start, args.end, args.step)
+    # 展开文件（支持多个输入：路径/目录/glob，合并去重保序）
+    files = []
+    seen = set()
+    for spec in args.input:
+        for f in expand_paths(spec, args.start, args.end, args.step):
+            if f not in seen:
+                seen.add(f)
+                files.append(f)
     if not files:
-        print(f"错误：未找到图片（输入: {args.input}）", file=sys.stderr)
+        print(f"错误：未找到图片（输入: {' '.join(args.input)}）", file=sys.stderr)
         sys.exit(2)
 
     # 构建配置

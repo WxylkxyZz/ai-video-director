@@ -110,8 +110,9 @@ cp /path/to/video.mp4 .
 # 2. 让 Claude 分析（一次性全流程）
 # 直接告诉 Claude：分析 video.mp4
 
-# 3. 或手动跑单帧
-python vision_reader.py tmp/<视频名>/frames/frame_0003.jpg --prompt-file tmp/<视频名>/prompt.txt
+# 3. 或手动读图（支持一次多张 / 目录 / glob）
+python vision_reader.py a.jpg b.jpg --prompt-file prompt.txt
+python vision_reader.py tmp/<视频名>/frames --prompt-file tmp/<视频名>/prompt.txt
 ```
 
 ## tmp/ 目录约定（重要）
